@@ -3,11 +3,14 @@ from __future__ import annotations
 import os
 import re
 import sys
+import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import django
 from asgiref.sync import sync_to_async
+from django.db import connection
 from django.utils import timezone
 from scrapy.exceptions import DropItem
 
@@ -28,12 +31,32 @@ from apps.scraping_logs.models import ScrapeRun, ScrapeRunStatus  # noqa: E402
 from apps.sports.models import Organization, Sport  # noqa: E402
 
 
+logger = logging.getLogger(__name__)
+
+
 def _fallback_slug(value: str) -> str:
     """Simple ASCII slug used only if django.utils.text.slugify is unavailable."""
     value = value.lower().strip()
     value = re.sub(r"[^\w\s-]", "", value)
     value = re.sub(r"[\s_]+", "-", value)
     return re.sub(r"-+", "-", value)
+
+
+def _safe_database_target() -> str:
+    """Describe the active DB target without exposing credentials."""
+    database_url = os.environ.get("DATABASE_URL", "")
+    if database_url:
+        parsed = urlparse(database_url)
+        database_name = unquote(parsed.path.lstrip("/")) or "(no database name)"
+        return f"DATABASE_URL host={parsed.hostname or '(no host)'} db={database_name}"
+
+    settings = connection.settings_dict
+    return (
+        "DATABASE_URL not set; "
+        f"engine={settings.get('ENGINE')} "
+        f"host={settings.get('HOST') or '(local)'} "
+        f"db={settings.get('NAME')}"
+    )
 
 
 class DjangoEventPipeline:
@@ -43,12 +66,14 @@ class DjangoEventPipeline:
     def from_crawler(cls, crawler: Any) -> "DjangoEventPipeline":
         instance = cls()
         instance.crawler = crawler
+        logger.info("DjangoEventPipeline enabled via Scrapy ITEM_PIPELINES.")
         return instance
 
     async def open_spider(self) -> None:
         self.total_found = 0
         self.total_created = 0
         self.total_updated = 0
+        logger.info("DjangoEventPipeline opening. Active database: %s", _safe_database_target())
         self.run = await sync_to_async(self._create_scrape_run)()
 
     async def process_item(self, item: dict[str, Any], spider: Any) -> dict[str, Any]:
@@ -66,15 +91,39 @@ class DjangoEventPipeline:
         if not item.get("slug"):
             item["slug"] = _fallback_slug(str(item["title"]))[:280]
 
-        created = await sync_to_async(self._save_event)(item)
+        logger.info(
+            "PIPELINE SAVE START external_id=%r title=%r start_date=%s",
+            item.get("external_id") or "",
+            item.get("title"),
+            item.get("start_date"),
+        )
+        created, event_id = await sync_to_async(self._save_event)(item)
         if created:
             self.total_created += 1
+            result = "created"
         else:
             self.total_updated += 1
+            result = "updated"
+
+        logger.info(
+            "PIPELINE SAVE DONE external_id=%r title=%r start_date=%s result=%s event_id=%s",
+            item.get("external_id") or "",
+            item.get("title"),
+            item.get("start_date"),
+            result,
+            event_id,
+        )
 
         return item
 
     async def close_spider(self) -> None:
+        saved_count, saved_2026_count = await sync_to_async(self._future_saved_counts)()
+        logger.info(
+            "POST-CRAWL saved_count start_date>=%s count=%s saved_2026_count=%s",
+            timezone.localdate(),
+            saved_count,
+            saved_2026_count,
+        )
         await sync_to_async(self._finish_scrape_run)()
 
     # ── Synchronous DB helpers (called via sync_to_async) ─────────────────────
@@ -87,7 +136,7 @@ class DjangoEventPipeline:
             status=ScrapeRunStatus.RUNNING,
         )
 
-    def _save_event(self, item: dict[str, Any]) -> bool:
+    def _save_event(self, item: dict[str, Any]) -> tuple[bool, int]:
         sport, _ = Sport.objects.get_or_create(
             slug=item["sport_slug"],
             defaults={"name": item.get("sport_name") or item["sport_slug"].title()},
@@ -125,8 +174,30 @@ class DjangoEventPipeline:
             "status": item.get("status") or EventStatus.UNKNOWN,
         }
 
-        _, created = Event.objects.update_or_create(defaults=defaults, **lookup)
-        return created
+        try:
+            event, created = Event.objects.update_or_create(defaults=defaults, **lookup)
+        except Exception:
+            logger.exception(
+                "PIPELINE SAVE ERROR during update_or_create external_id=%r title=%r "
+                "start_date=%s lookup=%r",
+                external_id,
+                item.get("title"),
+                item.get("start_date"),
+                {
+                    key: str(value)
+                    for key, value in lookup.items()
+                    if key != "organization"
+                }
+                | {"organization_id": organization.id},
+            )
+            raise
+        return created, event.id
+
+    def _future_saved_counts(self) -> tuple[int, int]:
+        today = timezone.localdate()
+        future_events = Event.objects.filter(start_date__gte=today)
+        current_year_future_events = future_events.filter(start_date__year=today.year)
+        return future_events.count(), current_year_future_events.count()
 
     def _finish_scrape_run(self) -> None:
         status = ScrapeRunStatus.SUCCESS
