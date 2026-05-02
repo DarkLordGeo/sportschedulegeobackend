@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import django
+from asgiref.sync import sync_to_async
 from django.utils import timezone
 from scrapy.exceptions import DropItem
 
@@ -29,27 +30,46 @@ from apps.sports.models import Organization, Sport  # noqa: E402
 class DjangoEventPipeline:
     """Persist normalized scraper items through Django ORM into the shared database."""
 
-    def open_spider(self, spider: Any) -> None:
-        self.run = ScrapeRun.objects.create(
+    async def open_spider(self, spider: Any) -> None:
+        self.total_found = 0
+        self.total_created = 0
+        self.total_updated = 0
+        self.run = await sync_to_async(self._create_scrape_run)(spider)
+
+    async def process_item(self, item: dict[str, Any], spider: Any) -> dict[str, Any]:
+        self.total_found += 1
+
+        required_fields = ["title", "start_date", "source_url", "sport_slug", "organization_slug"]
+        missing_fields = [field for field in required_fields if not item.get(field)]
+
+        if missing_fields:
+            raise DropItem(f"Missing required event fields: {', '.join(missing_fields)}")
+
+        created = await sync_to_async(self._save_event)(item)
+
+        if created:
+            self.total_created += 1
+        else:
+            self.total_updated += 1
+
+        return item
+
+    async def close_spider(self, spider: Any) -> None:
+        await sync_to_async(self._finish_scrape_run)(spider)
+
+    def _create_scrape_run(self, spider: Any) -> ScrapeRun:
+        return ScrapeRun.objects.create(
             source_name=getattr(spider, "source_name", spider.name),
             started_at=timezone.now(),
             status=ScrapeRunStatus.RUNNING,
         )
-        self.total_found = 0
-        self.total_created = 0
-        self.total_updated = 0
 
-    def process_item(self, item: dict[str, Any], spider: Any) -> dict[str, Any]:
-        self.total_found += 1
-        required_fields = ["title", "start_date", "source_url", "sport_slug", "organization_slug"]
-        missing_fields = [field for field in required_fields if not item.get(field)]
-        if missing_fields:
-            raise DropItem(f"Missing required event fields: {', '.join(missing_fields)}")
-
+    def _save_event(self, item: dict[str, Any]) -> bool:
         sport, _ = Sport.objects.get_or_create(
             slug=item["sport_slug"],
             defaults={"name": item.get("sport_name") or item["sport_slug"].title()},
         )
+
         organization, _ = Organization.objects.get_or_create(
             sport=sport,
             slug=item["organization_slug"],
@@ -59,8 +79,8 @@ class DjangoEventPipeline:
             },
         )
 
-        lookup: dict[str, Any]
         external_id = item.get("external_id") or ""
+
         if external_id:
             lookup = {"organization": organization, "external_id": external_id}
         else:
@@ -80,19 +100,18 @@ class DjangoEventPipeline:
             "external_id": external_id,
             "status": item.get("status") or EventStatus.UNKNOWN,
         }
-        _, created = Event.objects.update_or_create(defaults=defaults, **lookup)
-        if created:
-            self.total_created += 1
-        else:
-            self.total_updated += 1
-        return item
 
-    def close_spider(self, spider: Any) -> None:
+        _, created = Event.objects.update_or_create(defaults=defaults, **lookup)
+        return created
+
+    def _finish_scrape_run(self, spider: Any) -> None:
         error_message = ""
         status = ScrapeRunStatus.SUCCESS
+
         if getattr(spider, "crawler", None):
             stats = spider.crawler.stats.get_stats()
             error_count = stats.get("log_count/ERROR", 0)
+
             if error_count:
                 status = ScrapeRunStatus.PARTIAL
                 error_message = f"Scrapy logged {error_count} error(s). Check scraper logs."
