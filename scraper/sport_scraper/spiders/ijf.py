@@ -14,6 +14,12 @@ from sport_scraper.items import EventItem
 CALENDAR_YEARS = ["2025", "2026", "2027"]
 CALENDAR_AGES = ["world_tour", "sen", "jun", "cad", "othr"]
 
+# Strings that indicate a td is NOT a location (action buttons / status text)
+_NON_LOCATION = re.compile(
+    r"results|draw|judoka|event info|schedule|live|buy|ticket",
+    re.IGNORECASE,
+)
+
 
 class IjfSpider(scrapy.Spider):
     name = "ijf"
@@ -21,32 +27,25 @@ class IjfSpider(scrapy.Spider):
     allowed_domains = ["ijf.org", "www.ijf.org"]
 
     def start_requests(self) -> Iterable[scrapy.Request]:
-        """Generate requests for each year + category combination."""
         for year in CALENDAR_YEARS:
             for age in CALENDAR_AGES:
                 url = f"https://www.ijf.org/calendar?year={year}&age={age}"
                 yield scrapy.Request(url, callback=self.parse_calendar)
 
     def parse_calendar(self, response: scrapy.http.Response) -> Iterable[EventItem]:
-        """
-        Parse the IJF calendar page.
-        Events are rendered in an HTML table. Each row contains:
-          - Date cell: e.g. "February  7 - 8"
-          - Empty cell (flag/icon)
-          - Competition link: <a href="/competition/3131">Paris Grand Slam 2026</a>
-          - Athletes/nations info
-          - Location: "France, Paris"
-        """
         rows = response.css("table tr")
         self.logger.info(f"Found {len(rows)} table rows on {response.url}")
 
+        year_match = re.search(r"year=(\d{4})", response.url)
+        year = year_match.group(1) if year_match else ""
+
         for row in rows:
-            # Date is in first <td>
+            # Date is in the first <td>
             date_text = " ".join(row.css("td:first-child *::text").getall()).strip()
             if not date_text:
                 continue
 
-            # Competition link
+            # Competition link must exist
             comp_link = row.css("td a[href*='/competition/']")
             if not comp_link:
                 continue
@@ -58,19 +57,20 @@ class IjfSpider(scrapy.Spider):
             if not title or not source_url:
                 continue
 
-            # Location — last <td> typically contains "Country, City"
-            tds = row.css("td")
+            # Find location: iterate tds, skip date col, skip title col,
+            # skip any td that looks like action buttons/status text
             location = ""
-            if len(tds) >= 2:
-                # Try last td for location
-                location = self.clean_text(" ".join(tds[-1].css("*::text").getall()))
-                # If it looks like athlete count or something weird, skip
-                if re.search(r"\d+\s+athletes", location, re.IGNORECASE):
-                    location = ""
-
-            # Extract year from URL params for date parsing context
-            year_match = re.search(r"year=(\d{4})", response.url)
-            year = year_match.group(1) if year_match else ""
+            tds = row.css("td")
+            for td in tds[1:]:
+                if td.css("a[href*='/competition/']"):
+                    continue  # title column
+                text = self.clean_text(" ".join(td.css("*::text").getall()))
+                if not text:
+                    continue
+                if _NON_LOCATION.search(text):
+                    continue
+                location = text
+                break
 
             start_date, end_date = self.parse_date_range(date_text, year)
             if not start_date:
@@ -107,6 +107,7 @@ class IjfSpider(scrapy.Spider):
         item["organization_name"] = "International Judo Federation"
         item["organization_website_url"] = "https://www.ijf.org/"
         item["title"] = self.clean_text(title)
+        item["slug"] = slugify(item["title"])[:280]
         item["location"] = self.clean_text(location)
         item["country"] = country
         item["city"] = city
@@ -122,18 +123,14 @@ class IjfSpider(scrapy.Spider):
         if not value:
             return None, None
 
-        # Split on "to", "-", "–", "—" surrounded by spaces
         parts = re.split(r"\s+[-–—]\s+", value, maxsplit=1)
         start_str = parts[0].strip()
         end_str = parts[1].strip() if len(parts) > 1 else ""
 
-        # Append year if missing
         if default_year:
             if default_year not in start_str:
                 start_str = f"{start_str} {default_year}"
-
             if end_str:
-                # Handle bare day number like "8" — prepend month from start
                 if re.fullmatch(r"\d{1,2}", end_str):
                     month_match = re.search(r"[A-Za-z]+", start_str)
                     if month_match:
@@ -154,13 +151,10 @@ class IjfSpider(scrapy.Spider):
             return None
 
     def split_location(self, location: str) -> tuple[str, str]:
-        """
-        IJF location format is typically "Country, City".
-        Returns (city, country).
-        """
+        """IJF format: 'Country, City' -> returns (city, country)."""
         parts = [p.strip() for p in location.split(",") if p.strip()]
         if len(parts) >= 2:
-            return parts[-1], parts[0]   # city=last, country=first
+            return parts[-1], parts[0]
         return "", parts[0] if parts else ""
 
     def extract_external_id(self, source_url: str) -> str:

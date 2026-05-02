@@ -10,6 +10,7 @@ class EventItem(scrapy.Item):
     organization_name = scrapy.Field()
     organization_website_url = scrapy.Field()
     title = scrapy.Field()
+    slug = scrapy.Field()
     location = scrapy.Field()
     country = scrapy.Field()
     city = scrapy.Field()
