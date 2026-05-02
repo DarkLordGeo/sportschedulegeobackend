@@ -95,7 +95,28 @@ Examples:
 
 ## Running the Scraper
 
-From the scraper folder:
+The scraper imports the Django project and writes through the Django ORM, so it
+must use the same `DATABASE_URL` as the backend when seeding production data.
+
+From the repository root, create a scraper env file if you want scraper-specific
+local settings:
+
+```bash
+copy scraper\.env.example scraper\.env
+```
+
+For production, set environment variables in the host instead of committing
+secrets. Required scraper environment variables:
+
+```text
+DATABASE_URL=<same Neon connection string used by the backend>
+DJANGO_SETTINGS_MODULE=config.settings
+SECRET_KEY=<any long Django secret>
+DEBUG=False
+DATABASE_CONN_MAX_AGE=600
+```
+
+Run the IJF scraper from the `scraper/` folder:
 
 ```bash
 cd scraper
@@ -105,6 +126,15 @@ scrapy crawl ijf
 The scraper is separate from the Django backend service, but it writes to the same database through Django's ORM. This keeps the first version simple and avoids creating private API authentication before it is needed. In deployment, run the backend and scraper as separate services using the same `DATABASE_URL`.
 
 The IJF spider is intentionally conservative. It includes realistic parsing hooks and TODOs because the live IJF page structure can change. Prefer updating selectors after inspecting the current official page rather than guessing.
+
+After the scraper runs against the production Neon database, verify that data is
+visible through the deployed API:
+
+```text
+https://sports-schedule-backend.onrender.com/api/sports/
+https://sports-schedule-backend.onrender.com/api/organizations/
+https://sports-schedule-backend.onrender.com/api/events/
+```
 
 ## Render + Neon Deployment
 
@@ -208,11 +238,46 @@ Backend service notes:
 - HTTPS security settings are enabled when `DEBUG=False`.
 - CORS is restricted to `CORS_ALLOWED_ORIGINS`.
 
-Scraper service:
+### 7. Create a Render Cron Job for the scraper
 
-- Deploy the `scraper/` service separately.
-- Include the repository code so the scraper can import the Django models.
-- Set the same `DATABASE_URL` and `DJANGO_SETTINGS_MODULE=config.settings`.
-- Run spiders on a schedule, for example with a cron job or platform scheduler.
+Create a separate Render Cron Job from the same GitHub repository:
+
+1. In Render, create **New +** -> **Cron Job**.
+2. Connect `DarkLordGeo/sportschedulegeobackend`.
+3. Use the repository root as the root directory.
+4. Set the build command:
+
+```bash
+pip install -r requirements.txt
+```
+
+5. Set the command:
+
+```bash
+cd scraper && scrapy crawl ijf
+```
+
+6. Set the schedule you want, for example daily:
+
+```text
+0 3 * * *
+```
+
+7. Set environment variables:
+
+```text
+DATABASE_URL=<same Neon connection string used by the backend>
+DJANGO_SETTINGS_MODULE=config.settings
+SECRET_KEY=<any long Django secret>
+DEBUG=False
+DATABASE_CONN_MAX_AGE=600
+```
+
+Do not use SQLite in production. The scraper has a production guard and will
+fail loudly when `DEBUG=False` and `DATABASE_URL` is missing.
+
+The scraper creates a `ScrapeRun` when it starts, updates totals as records are
+created or updated, logs invalid skipped records, and marks the run as
+`success`, `partial`, or `failed` when it ends.
 
 No frontend or custom authentication system is included yet. Admin-only management is handled by Django admin.
