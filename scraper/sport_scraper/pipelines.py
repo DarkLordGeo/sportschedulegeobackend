@@ -10,6 +10,7 @@ from urllib.parse import unquote, urlparse
 
 import django
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 from scrapy.exceptions import DropItem
@@ -21,7 +22,17 @@ def setup_django() -> None:
     if str(backend_path) not in sys.path:
         sys.path.insert(0, str(backend_path))
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+    logging.getLogger(__name__).info(
+        "DJANGO SETUP START settings_module=%s backend_path=%s",
+        os.environ.get("DJANGO_SETTINGS_MODULE"),
+        backend_path,
+    )
     django.setup()
+    logging.getLogger(__name__).info(
+        "DJANGO SETUP DONE configured=%s settings_module=%s",
+        settings.configured,
+        os.environ.get("DJANGO_SETTINGS_MODULE"),
+    )
 
 
 setup_django()
@@ -66,7 +77,10 @@ class DjangoEventPipeline:
     def from_crawler(cls, crawler: Any) -> "DjangoEventPipeline":
         instance = cls()
         instance.crawler = crawler
-        logger.info("DjangoEventPipeline enabled via Scrapy ITEM_PIPELINES.")
+        logger.info(
+            "DjangoEventPipeline enabled via Scrapy ITEM_PIPELINES=%r",
+            crawler.settings.getdict("ITEM_PIPELINES"),
+        )
         return instance
 
     async def open_spider(self) -> None:
@@ -106,10 +120,12 @@ class DjangoEventPipeline:
             result = "updated"
 
         logger.info(
-            "PIPELINE SAVE DONE external_id=%r title=%r start_date=%s result=%s event_id=%s",
+            "PIPELINE SAVE DONE external_id=%r title=%r start_date=%s created=%s "
+            "result=%s event_id=%s",
             item.get("external_id") or "",
             item.get("title"),
             item.get("start_date"),
+            created,
             result,
             event_id,
         )
@@ -175,6 +191,19 @@ class DjangoEventPipeline:
         }
 
         try:
+            logger.info(
+                "PIPELINE UPDATE_OR_CREATE CALL external_id=%r title=%r "
+                "start_date=%s lookup=%r",
+                external_id,
+                item.get("title"),
+                item.get("start_date"),
+                {
+                    key: str(value)
+                    for key, value in lookup.items()
+                    if key != "organization"
+                }
+                | {"organization_id": organization.id},
+            )
             event, created = Event.objects.update_or_create(defaults=defaults, **lookup)
         except Exception:
             logger.exception(
