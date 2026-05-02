@@ -11,8 +11,10 @@ from django.utils.text import slugify
 
 from sport_scraper.items import EventItem
 
-# Scrape these years. Add more as needed.
-CALENDAR_YEARS = ["2025", "2026", "2027"]
+def default_calendar_years() -> list[str]:
+    """Prioritize current and future IJF calendars so upcoming events are saved."""
+    current_year = date.today().year
+    return [str(current_year), str(current_year + 1)]
 
 # All IJF age-category slugs.
 CALENDAR_AGES = ["world_tour", "sen", "jun", "cad", "othr"]
@@ -39,10 +41,11 @@ class IjfSpider(scrapy.Spider):
     name = "ijf"
     source_name = "IJF"
     allowed_domains = ["ijf.org", "www.ijf.org"]
+    calendar_years = default_calendar_years()
 
     def start_requests(self) -> Iterable[scrapy.Request]:
         """Generate one request per year × age-category combination."""
-        for year in CALENDAR_YEARS:
+        for year in self.calendar_years:
             for age in CALENDAR_AGES:
                 url = f"https://www.ijf.org/calendar?year={year}&age={age}"
                 yield scrapy.Request(
@@ -156,6 +159,16 @@ class IjfSpider(scrapy.Spider):
             item["source_url"] = source_url
             item["external_id"] = external_id
             item["status"] = "unknown"
+
+            self.logger.info(
+                "EXTRACTED EVENT title=%r start_date=%s end_date=%s "
+                "location=%r source_url=%s",
+                title,
+                start_date,
+                end_date,
+                location or "",
+                source_url,
+            )
 
             self.logger.info(
                 f"[{year}/{age}] YIELD: '{title}' | {start_date}"
