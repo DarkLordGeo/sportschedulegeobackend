@@ -45,12 +45,12 @@ class EventApiPaginationOrderingTests(TestCase):
         return payload["results"] if "results" in payload else payload
 
     def event_titles(self) -> list[str]:
-        response = self.client.get(reverse("event-list"))
+        response = self.client.get(reverse("event-list"), follow=True)
         self.assertEqual(response.status_code, 200)
         return [event["title"] for event in self.response_results(response)]
 
     def filtered_titles(self, **params: str) -> list[str]:
-        response = self.client.get(reverse("event-list"), params)
+        response = self.client.get(reverse("event-list"), params, follow=True)
         self.assertEqual(response.status_code, 200)
         return [event["title"] for event in self.response_results(response)]
 
@@ -60,7 +60,7 @@ class EventApiPaginationOrderingTests(TestCase):
         tomorrow_event = self.create_event("Tomorrow Grand Slam", 1)
         later_event = self.create_event("Later Grand Slam", 30)
 
-        response = self.client.get(reverse("event-list"))
+        response = self.client.get(reverse("event-list"), follow=True)
 
         self.assertEqual(response.status_code, 200)
         results = self.response_results(response)
@@ -78,7 +78,7 @@ class EventApiPaginationOrderingTests(TestCase):
         older_past = self.create_event("Older Past Grand Slam", -365)
         recent_past = self.create_event("Recent Past Grand Slam", -1)
 
-        response = self.client.get(reverse("event-archive"))
+        response = self.client.get(reverse("event-archive"), follow=True)
 
         self.assertEqual(response.status_code, 200)
         results = self.response_results(response)
