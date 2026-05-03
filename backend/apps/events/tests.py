@@ -49,6 +49,11 @@ class EventApiPaginationOrderingTests(TestCase):
         self.assertEqual(response.status_code, 200)
         return [event["title"] for event in self.response_results(response)]
 
+    def filtered_titles(self, **params: str) -> list[str]:
+        response = self.client.get(reverse("event-list"), params)
+        self.assertEqual(response.status_code, 200)
+        return [event["title"] for event in self.response_results(response)]
+
     def test_events_list_returns_only_upcoming_ordered_by_nearest_date(self) -> None:
         self.create_event("Historical Grand Slam", -365, country="Georgia", city="Tbilisi")
         today_event = self.create_event("Today Grand Slam", 0)
@@ -115,4 +120,109 @@ class EventApiPaginationOrderingTests(TestCase):
         self.assertEqual(
             self.event_titles(),
             ["Today Tbilisi Event", "Future Paris Event"],
+        )
+
+    def test_search_matches_title_city_country_and_organization_name(self) -> None:
+        self.create_event("Tbilisi Grand Slam", 1, country="Georgia", city="Tbilisi")
+        self.create_event("Paris Masters", 2, country="France", city="Paris")
+        other_sport = Sport.objects.create(name="Boxing", slug="boxing")
+        other_org = Organization.objects.create(
+            name="Georgian Boxing Federation",
+            slug="gbf",
+            sport=other_sport,
+        )
+        Event.objects.create(
+            organization=other_org,
+            sport=other_sport,
+            title="Spring Open",
+            slug="spring-open",
+            location="Tbilisi, Georgia",
+            country="Georgia",
+            city="Tbilisi",
+            start_date=timezone.localdate() + timedelta(days=4),
+            end_date=timezone.localdate() + timedelta(days=4),
+            source_url="https://example.com/spring-open",
+            external_id="spring-open",
+            status=EventStatus.UPCOMING,
+        )
+
+        self.assertEqual(self.filtered_titles(search="grand slam"), ["Tbilisi Grand Slam"])
+        self.assertEqual(self.filtered_titles(search="paris"), ["Paris Masters"])
+        self.assertEqual(
+            self.filtered_titles(search="Georgian Boxing Federation"),
+            ["Spring Open"],
+        )
+
+    def test_country_filter_is_case_insensitive(self) -> None:
+        self.create_event("Tbilisi Grand Slam", 1, country="Georgia", city="Tbilisi")
+        self.create_event("Paris Masters", 2, country="France", city="Paris")
+
+        self.assertEqual(self.filtered_titles(country="georgia"), ["Tbilisi Grand Slam"])
+
+    def test_city_filter_is_case_insensitive(self) -> None:
+        self.create_event("Tbilisi Grand Slam", 1, country="Georgia", city="Tbilisi")
+        self.create_event("Batumi Cup", 2, country="Georgia", city="Batumi")
+
+        self.assertEqual(self.filtered_titles(city="tbilisi"), ["Tbilisi Grand Slam"])
+
+    def test_sport_filter_uses_slug(self) -> None:
+        self.create_event("Tbilisi Grand Slam", 1, country="Georgia", city="Tbilisi")
+        boxing = Sport.objects.create(name="Boxing", slug="boxing")
+        boxing_org = Organization.objects.create(
+            name="World Boxing",
+            slug="world-boxing",
+            sport=boxing,
+        )
+        Event.objects.create(
+            organization=boxing_org,
+            sport=boxing,
+            title="Boxing Open",
+            slug="boxing-open",
+            location="Paris, France",
+            country="France",
+            city="Paris",
+            start_date=timezone.localdate() + timedelta(days=3),
+            end_date=timezone.localdate() + timedelta(days=3),
+            source_url="https://example.com/boxing-open",
+            external_id="boxing-open",
+            status=EventStatus.UPCOMING,
+        )
+
+        self.assertEqual(self.filtered_titles(sport="boxing"), ["Boxing Open"])
+
+    def test_organization_filter_uses_slug(self) -> None:
+        self.create_event("IJF Grand Slam", 1, country="Georgia", city="Tbilisi")
+        eju = Organization.objects.create(
+            name="European Judo Union",
+            slug="eju",
+            sport=self.sport,
+        )
+        Event.objects.create(
+            organization=eju,
+            sport=self.sport,
+            title="EJU Open",
+            slug="eju-open",
+            location="Prague, Czechia",
+            country="Czechia",
+            city="Prague",
+            start_date=timezone.localdate() + timedelta(days=4),
+            end_date=timezone.localdate() + timedelta(days=4),
+            source_url="https://example.com/eju-open",
+            external_id="eju-open",
+            status=EventStatus.UPCOMING,
+        )
+
+        self.assertEqual(self.filtered_titles(organization="eju"), ["EJU Open"])
+
+    def test_date_range_filter_uses_start_date(self) -> None:
+        self.create_event("Early Event", 1)
+        self.create_event("Middle Event", 5)
+        self.create_event("Late Event", 10)
+
+        self.assertEqual(
+            self.filtered_titles(
+                date_from=str(timezone.localdate() + timedelta(days=2)),
+                date_to=str(timezone.localdate() + timedelta(days=7)),
+            ),
+            ["Middle Event"],
         )
